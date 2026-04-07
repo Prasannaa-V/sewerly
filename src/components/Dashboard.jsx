@@ -11,22 +11,32 @@ import ChartSection from './ChartSection';
 import AlertsSection from './AlertsSection';
 import LocationPanel from './LocationPanel';
 import DeviceHealthSection from './DeviceHealthSection';
-import { generateSensorData, generateTimeSeriesData, thresholds } from '../utils/data';
+import { thresholds } from '../utils/data';
 import { getStatus } from '../utils/helpers';
+import { subscribeToLatestReading, subscribeToReadings, formatChartTime, getStatusFromReading } from '../utils/firebase';
 
 const Dashboard = () => {
-  const [data, setData] = useState(generateSensorData());
+  const [data, setData] = useState({
+    h2s: 0,
+    ch4: 0,
+    waterLevel: 0,
+    alert: false,
+    status: 'Safe',
+    battery: 95,
+    location: {
+      id: 'MH-1023',
+      lat: 12.9692,
+      lng: 79.1559,
+    },
+    lastUpdated: new Date().toISOString(),
+  });
   const [chartData, setChartData] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const newChartData = generateTimeSeriesData();
-    setChartData(newChartData);
-    generateAlerts(data);
-  }, []);
-
-  const generateAlerts = (sensorData = data) => {
+  // Generate alerts based on sensor data
+  const generateAlerts = (sensorData) => {
     const newAlerts = [];
 
     const h2sStatus = getStatus(
@@ -57,46 +67,84 @@ const Dashboard = () => {
       newAlerts.push({
         status: 'danger',
         title: 'Methane Danger',
-        message: `CH4 level is ${sensorData.ch4} %LEL, exceeding danger threshold of ${thresholds.ch4Danger} %LEL`,
+        message: `CH4 level is ${sensorData.ch4} ppm, exceeding danger threshold of ${thresholds.ch4Danger} ppm`,
       });
     } else if (ch4Status === 'warning') {
       newAlerts.push({
         status: 'warning',
         title: 'Methane Warning',
-        message: `CH4 level is ${sensorData.ch4} %LEL, approaching danger level`,
+        message: `CH4 level is ${sensorData.ch4} ppm, approaching danger level`,
       });
     }
 
-    const waterStatus = getStatus(
-      sensorData.waterLevel,
-      thresholds.waterLevelWarning,
-      thresholds.waterLevelDanger
-    );
-    if (waterStatus === 'danger') {
+    if (sensorData.alert) {
       newAlerts.push({
         status: 'danger',
-        title: 'Overflow Risk Critical',
-        message: `Water level is ${sensorData.waterLevel} cm, exceeding danger threshold of ${thresholds.waterLevelDanger} cm`,
-      });
-    } else if (waterStatus === 'warning') {
-      newAlerts.push({
-        status: 'warning',
-        title: 'Overflow Risk',
-        message: `Water level is ${sensorData.waterLevel} cm, approaching danger level`,
+        title: 'System Alert',
+        message: `Alert triggered by sensor reading`,
       });
     }
 
     setAlerts(newAlerts);
   };
 
+  useEffect(() => {
+    // Subscribe to latest reading
+    const unsubscribeLatest = subscribeToLatestReading((reading) => {
+      console.log("📥 Dashboard received latest reading:", reading);
+      
+      const newData = {
+        h2s: reading.h2s || 0,
+        ch4: reading.ch4 || 0,
+        waterLevel: reading.water || 0,
+        alert: reading.alert || false,
+        status: reading.status || 'Safe',
+        battery: 95,
+        location: {
+          id: 'MH-1023',
+          lat: 12.9692,
+          lng: 79.1559,
+        },
+        lastUpdated: reading.timestamp ? reading.timestamp.toDate().toISOString() : new Date().toISOString(),
+      };
+      
+      setData(newData);
+      generateAlerts(reading);
+      setIsLoading(false);
+    });
+
+    // Subscribe to historical data for charts
+    const unsubscribeHistory = subscribeToReadings(20, (readings) => {
+      console.log("📊 Dashboard received chart data, count:", readings.length);
+      
+      const chartReadings = readings.map((reading) => ({
+        time: reading.timestamp ? formatChartTime(reading.timestamp) : 'N/A',
+        h2s: reading.h2s || 0,
+        ch4: reading.ch4 || 0,
+        waterLevel: reading.water || 0,
+      }));
+      setChartData(chartReadings);
+    });
+
+    return () => {
+      unsubscribeLatest();
+      unsubscribeHistory();
+    };
+  }, []);
+
+  // Log when data changes
+  useEffect(() => {
+    console.log("🔄 Dashboard DATA changed:", data);
+  }, [data]);
+
+  // Log when chart data changes
+  useEffect(() => {
+    console.log("📈 Dashboard CHART DATA changed, count:", chartData.length);
+  }, [chartData]);
+
   const handleRefresh = () => {
     setIsRefreshing(true);
     setTimeout(() => {
-      const newData = generateSensorData();
-      const newChartData = generateTimeSeriesData();
-      setData(newData);
-      setChartData(newChartData);
-      generateAlerts(newData);
       setIsRefreshing(false);
     }, 500);
   };
@@ -133,6 +181,15 @@ const Dashboard = () => {
                 </h1>
                 <p className="text-sm text-gray-600">
                   Real-time Gas & Overflow Monitoring System
+                  {isLoading ? (
+                    <span className="ml-2 inline-block text-yellow-600">
+                      • Connecting to Firebase...
+                    </span>
+                  ) : (
+                    <span className="ml-2 inline-block text-green-600">
+                      • 🔴 Live
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
