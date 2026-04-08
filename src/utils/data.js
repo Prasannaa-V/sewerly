@@ -80,8 +80,6 @@ export const generateSensorData = () => {
   };
 };
 
-export const sensorData = generateSensorData();
-
 export const generateTimeSeriesData = () => {
   const now = new Date();
   const data = [];

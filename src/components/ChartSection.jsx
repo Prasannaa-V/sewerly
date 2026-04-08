@@ -1,5 +1,4 @@
 import React from 'react';
-import { FiTrendingUp } from 'react-icons/fi';
 import {
   LineChart,
   Line,

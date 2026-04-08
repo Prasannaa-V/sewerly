@@ -1,13 +1,6 @@
 import React from 'react';
 import {
-  FiDroplet,
-  FiAlertTriangle,
-  FiCheckCircle,
-  FiAlertCircle,
-} from 'react-icons/fi';
-import {
   getStatusColor,
-  getStatusTextColor,
   getStatusBorderColor,
   getIconColor,
 } from '../utils/helpers';
