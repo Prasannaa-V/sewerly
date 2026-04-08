@@ -397,7 +397,7 @@ const Dashboard = () => {
               <div className="grid grid-cols-1 gap-3 text-sm text-gray-600 sm:grid-cols-3">
                 <div className="rounded-lg bg-gray-50 px-4 py-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">
-                    Bridge
+                    Storage
                   </p>
                   <p className="mt-1 font-semibold text-gray-800">
                     {integration.storageMode}
@@ -405,7 +405,7 @@ const Dashboard = () => {
                 </div>
                 <div className="rounded-lg bg-gray-50 px-4 py-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">
-                    Readings Cached
+                    Readings Stored
                   </p>
                   <p className="mt-1 font-semibold text-gray-800">
                     {integration.totalReadings}
