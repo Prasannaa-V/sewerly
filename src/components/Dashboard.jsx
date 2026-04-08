@@ -6,23 +6,24 @@ import ChartSection from './ChartSection';
 import AlertsSection from './AlertsSection';
 import LocationPanel from './LocationPanel';
 import DeviceHealthSection from './DeviceHealthSection';
-import { thresholds } from '../utils/data';
+import {
+  generateSensorData,
+  generateTimeSeriesData,
+  thresholds,
+} from '../utils/data';
 import { getStatus } from '../utils/helpers';
+import {
+  bridgeApiBase,
+  fetchBridgeHealth,
+  fetchLatestSensorSnapshot,
+  fetchSensorHistory,
+} from '../utils/liveData';
 
-const Dashboard = () => {
-  const [data, setData] = useState(generateSensorData());
-  const [chartData, setChartData] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+const HISTORY_LIMIT = 20;
+const POLL_INTERVAL_MS = 3000;
 
-  useEffect(() => {
-    const newChartData = generateTimeSeriesData();
-    setChartData(newChartData);
-    generateAlerts(data);
-  }, []);
-
-  const generateAlerts = (sensorData = data) => {
-    const newAlerts = [];
+const buildAlerts = (sensorData) => {
+  const newAlerts = [];
 
   const h2sStatus = getStatus(
     sensorData.h2s,
@@ -43,55 +44,253 @@ const Dashboard = () => {
     });
   }
 
-    const ch4Status = getStatus(
-      sensorData.ch4,
-      thresholds.ch4Warning,
-      thresholds.ch4Danger
-    );
-    if (ch4Status === 'danger') {
-      newAlerts.push({
-        status: 'danger',
-        title: 'Methane Danger',
-        message: `CH4 level is ${sensorData.ch4} %LEL, exceeding danger threshold of ${thresholds.ch4Danger} %LEL`,
-      });
-    } else if (ch4Status === 'warning') {
-      newAlerts.push({
-        status: 'warning',
-        title: 'Methane Warning',
-        message: `CH4 level is ${sensorData.ch4} %LEL, approaching danger level`,
-      });
-    }
+  const ch4Status = getStatus(
+    sensorData.ch4,
+    thresholds.ch4Warning,
+    thresholds.ch4Danger
+  );
+  if (ch4Status === 'danger') {
+    newAlerts.push({
+      status: 'danger',
+      title: 'Methane Danger',
+      message: `CH4 concentration is ${sensorData.ch4} ppm, above the ${thresholds.ch4Danger} ppm alarm threshold.`,
+    });
+  } else if (ch4Status === 'warning') {
+    newAlerts.push({
+      status: 'warning',
+      title: 'Methane Warning',
+      message: `CH4 concentration is ${sensorData.ch4} ppm and nearing the alarm threshold.`,
+    });
+  }
 
-    const waterStatus = getStatus(
-      sensorData.waterLevel,
-      thresholds.waterLevelWarning,
-      thresholds.waterLevelDanger
-    );
-    if (waterStatus === 'danger') {
-      newAlerts.push({
-        status: 'danger',
-        title: 'Overflow Risk Critical',
-        message: `Water level is ${sensorData.waterLevel} cm, exceeding danger threshold of ${thresholds.waterLevelDanger} cm`,
-      });
-    } else if (waterStatus === 'warning') {
-      newAlerts.push({
-        status: 'warning',
-        title: 'Overflow Risk',
-        message: `Water level is ${sensorData.waterLevel} cm, approaching danger level`,
-      });
-    }
+  const waterStatus = getStatus(
+    sensorData.waterLevel,
+    thresholds.waterLevelWarning,
+    thresholds.waterLevelDanger
+  );
+  if (waterStatus === 'danger') {
+    newAlerts.push({
+      status: 'danger',
+      title: 'Overflow Risk Critical',
+      message: `Water level is ${sensorData.waterLevel} cm, exceeding the ${thresholds.waterLevelDanger} cm overflow limit.`,
+    });
+  } else if (waterStatus === 'warning') {
+    newAlerts.push({
+      status: 'warning',
+      title: 'Overflow Risk',
+      message: `Water level is ${sensorData.waterLevel} cm and rising toward the overflow limit.`,
+    });
+  }
 
-    setAlerts(newAlerts);
+  return newAlerts;
+};
+
+const formatChartTime = (timestamp) =>
+  new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+const sortReadings = (readings = []) =>
+  [...readings].sort(
+    (firstReading, secondReading) =>
+      new Date(firstReading.lastUpdated) - new Date(secondReading.lastUpdated)
+  );
+
+const buildChartData = (readings = []) =>
+  sortReadings(readings)
+    .slice(-HISTORY_LIMIT)
+    .map((reading) => ({
+      time: formatChartTime(reading.lastUpdated),
+      h2s: reading.h2s,
+      ch4: reading.ch4,
+      waterLevel: reading.waterLevel,
+    }));
+
+const readBridgeState = async () => {
+  const [healthResult, latestResult, historyResult] = await Promise.allSettled([
+    fetchBridgeHealth(),
+    fetchLatestSensorSnapshot(),
+    fetchSensorHistory(HISTORY_LIMIT),
+  ]);
+
+  const bridgeHealth =
+    healthResult.status === 'fulfilled' ? healthResult.value : null;
+  const latestSnapshot =
+    latestResult.status === 'fulfilled' ? latestResult.value : null;
+  const historySnapshot =
+    historyResult.status === 'fulfilled' ? historyResult.value : null;
+  const historyReadings = Array.isArray(historySnapshot?.readings)
+    ? historySnapshot.readings
+    : [];
+  const latestReading =
+    latestSnapshot?.reading ||
+    historyReadings[historyReadings.length - 1] ||
+    null;
+
+  return {
+    bridgeHealth,
+    historySnapshot,
+    latestReading,
+    historyReadings,
   };
+};
 
-  const handleRefresh = () => {
+const buildIntegrationState = ({
+  mode,
+  bridgeHealth = null,
+  totalReadings = 0,
+}) => {
+  const storageMode = bridgeHealth?.storageMode || 'offline';
+
+  if (mode === 'live') {
+    return {
+      mode,
+      label: 'Wokwi Live',
+      storageMode,
+      totalReadings,
+      message:
+        'Dashboard is reading the Wokwi bridge in real time and updating from the live sensor stream.',
+    };
+  }
+
+  if (mode === 'waiting') {
+    return {
+      mode,
+      label: 'Waiting for Stream',
+      storageMode,
+      totalReadings,
+      message:
+        'The bridge is reachable, but it has not received any Wokwi readings yet. Start the simulator and watcher to populate the dashboard.',
+    };
+  }
+
+  if (mode === 'disconnected') {
+    return {
+      mode,
+      label: 'Bridge Offline',
+      storageMode,
+      totalReadings,
+      message:
+        'The last live reading is still shown, but the bridge is not responding right now.',
+    };
+  }
+
+  return {
+    mode: 'demo',
+    label: 'Demo Mode',
+    storageMode,
+    totalReadings,
+    message: `No bridge was found at ${bridgeApiBase}, so the dashboard is showing built-in sample data.`,
+  };
+};
+
+const Dashboard = () => {
+  const [data, setData] = useState(() => generateSensorData());
+  const [chartData, setChartData] = useState(() => generateTimeSeriesData());
+  const [alerts, setAlerts] = useState(() => buildAlerts(generateSensorData()));
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [hasLiveFeed, setHasLiveFeed] = useState(false);
+  const [integration, setIntegration] = useState(
+    buildIntegrationState({ mode: 'demo' })
+  );
+
+  useEffect(() => {
+    setAlerts(buildAlerts(data));
+  }, [data]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncLiveData = async () => {
+      const bridgeState = await readBridgeState();
+      if (!isMounted) {
+        return;
+      }
+
+      if (bridgeState.latestReading) {
+        const readings =
+          bridgeState.historyReadings.length > 0
+            ? bridgeState.historyReadings
+            : [bridgeState.latestReading];
+
+        setData(bridgeState.latestReading);
+        setChartData(buildChartData(readings));
+        setIntegration(
+          buildIntegrationState({
+            mode: 'live',
+            bridgeHealth: bridgeState.bridgeHealth,
+            totalReadings:
+              bridgeState.historySnapshot?.totalReadings || readings.length,
+          })
+        );
+        setHasLiveFeed(true);
+        return;
+      }
+
+      if (bridgeState.bridgeHealth) {
+        setIntegration(
+          buildIntegrationState({
+            mode: 'waiting',
+            bridgeHealth: bridgeState.bridgeHealth,
+            totalReadings: bridgeState.historySnapshot?.totalReadings || 0,
+          })
+        );
+        return;
+      }
+
+      setIntegration(
+        buildIntegrationState({
+          mode: hasLiveFeed ? 'disconnected' : 'demo',
+        })
+      );
+    };
+
+    void syncLiveData();
+    const intervalId = window.setInterval(() => {
+      void syncLiveData();
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, [hasLiveFeed]);
+
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    setTimeout(() => {
-      const newData = generateSensorData();
-      const newChartData = generateTimeSeriesData();
-      setData(newData);
-      setChartData(newChartData);
-      generateAlerts(newData);
+
+    const bridgeState = await readBridgeState();
+
+    if (bridgeState.latestReading) {
+      const readings =
+        bridgeState.historyReadings.length > 0
+          ? bridgeState.historyReadings
+          : [bridgeState.latestReading];
+
+      setData(bridgeState.latestReading);
+      setChartData(buildChartData(readings));
+      setIntegration(
+        buildIntegrationState({
+          mode: 'live',
+          bridgeHealth: bridgeState.bridgeHealth,
+          totalReadings:
+            bridgeState.historySnapshot?.totalReadings || readings.length,
+        })
+      );
+      setHasLiveFeed(true);
+      setIsRefreshing(false);
+      return;
+    }
+
+    if (bridgeState.bridgeHealth) {
+      setIntegration(
+        buildIntegrationState({
+          mode: 'waiting',
+          bridgeHealth: bridgeState.bridgeHealth,
+          totalReadings: bridgeState.historySnapshot?.totalReadings || 0,
+        })
+      );
       setIsRefreshing(false);
       return;
     }
@@ -120,9 +319,9 @@ const Dashboard = () => {
     thresholds.waterLevelDanger
   );
   const overallStatus =
-    data.status.toLowerCase() === 'warning'
+    data.status?.toLowerCase() === 'warning'
       ? 'warning'
-      : data.status.toLowerCase() === 'danger'
+      : data.status?.toLowerCase() === 'danger'
         ? 'danger'
         : 'safe';
   const integrationToneClasses = {
@@ -144,7 +343,6 @@ const Dashboard = () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="border-b border-gray-200 bg-white shadow-sm">
         <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between">
@@ -157,7 +355,7 @@ const Dashboard = () => {
                   Smart Manhole Monitoring
                 </h1>
                 <p className="text-sm text-gray-600">
-                  Real-time Gas & Overflow Monitoring System
+                  Real-time gas, overflow, and Wokwi simulation monitoring
                 </p>
               </div>
             </div>
@@ -183,7 +381,6 @@ const Dashboard = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <section className="mb-8">
           <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
@@ -200,7 +397,7 @@ const Dashboard = () => {
               <div className="grid grid-cols-1 gap-3 text-sm text-gray-600 sm:grid-cols-3">
                 <div className="rounded-lg bg-gray-50 px-4 py-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">
-                    Bridge
+                    Storage
                   </p>
                   <p className="mt-1 font-semibold text-gray-800">
                     {integration.storageMode}
@@ -208,7 +405,7 @@ const Dashboard = () => {
                 </div>
                 <div className="rounded-lg bg-gray-50 px-4 py-3">
                   <p className="text-xs uppercase tracking-wide text-gray-500">
-                    Readings Cached
+                    Readings Stored
                   </p>
                   <p className="mt-1 font-semibold text-gray-800">
                     {integration.totalReadings}
@@ -227,7 +424,6 @@ const Dashboard = () => {
           </div>
         </section>
 
-        {/* Summary Cards Section */}
         <section className="mb-8">
           <h2 className="mb-4 text-lg font-semibold text-gray-800">
             Real-Time Metrics
@@ -264,7 +460,6 @@ const Dashboard = () => {
           </div>
         </section>
 
-        {/* Charts Section */}
         <section className="mb-8">
           <h2 className="mb-4 text-lg font-semibold text-gray-800">
             Historical Trends (Last 20 readings)
@@ -301,13 +496,12 @@ const Dashboard = () => {
           </div>
         </section>
 
-        {/* Alerts and Info Section */}
         <section className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <div className="lg:col-span-2">
-              <h2 className="mb-4 text-lg font-semibold text-gray-800">
-                System Alerts
-              </h2>
-              <AlertsSection alerts={alerts} />
+          <div className="lg:col-span-2">
+            <h2 className="mb-4 text-lg font-semibold text-gray-800">
+              System Alerts
+            </h2>
+            <AlertsSection alerts={alerts} />
           </div>
 
           <div>
@@ -321,7 +515,6 @@ const Dashboard = () => {
           </div>
         </section>
 
-        {/* Location Panel */}
         <section className="mb-8">
           <h2 className="mb-4 text-lg font-semibold text-gray-800">
             Location & Metadata
@@ -333,11 +526,11 @@ const Dashboard = () => {
         </section>
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-gray-200 bg-white py-6">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center">
+        <div className="mx-auto max-w-7xl px-4 text-center sm:px-6 lg:px-8">
           <p className="text-sm text-gray-600">
-            © 2024 Smart Manhole Monitoring System | Polling Wokwi bridge every 3 seconds
+            © 2024 Smart Manhole Monitoring System | Polling Wokwi bridge every
+            3 seconds
           </p>
         </div>
       </footer>
